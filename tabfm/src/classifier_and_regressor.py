@@ -84,6 +84,8 @@ class CategoricalOrdinalEncoder(BaseEstimator, TransformerMixin):
         data (original behaviour).
       - ``"frequency"``: categories are sorted by descending frequency, so
         the most common category receives index 0.
+      - ``"alphabetical"``: categories are sorted ascending (alphabetically),
+        matching scikit-learn's ``LabelEncoder`` convention.
   """
 
   categories_: List[np.ndarray]
@@ -148,6 +150,10 @@ class CategoricalOrdinalEncoder(BaseEstimator, TransformerMixin):
         uniques = [u for u in uniques if str(u) != "nan"]
         # Filter rare categories
         uniques = [u for u in uniques if u not in rare_cats]
+        if self.mode == "alphabetical":
+          # Sort categories so encoding matches sklearn's LabelEncoder
+          # convention (classes ordered ascending / alphabetically).
+          uniques = sorted(uniques)
 
       self.categories_.append(np.array(uniques))
 
@@ -1472,8 +1478,8 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
     """
     check_classification_targets(y)
 
-    # Encode class labels
-    self.y_encoder_ = CategoricalOrdinalEncoder(dtype=np.int64)
+    # Encode class labels (sorted/alphabetical to match sklearn convention)
+    self.y_encoder_ = CategoricalOrdinalEncoder(dtype=np.int64, mode="alphabetical")
     # Reshape for CategoricalOrdinalEncoder
     y_2d = y.reshape(-1, 1) if isinstance(y, np.ndarray) else np.array(y).reshape(-1, 1)
     y_encoded = self.y_encoder_.fit_transform(y_2d)
