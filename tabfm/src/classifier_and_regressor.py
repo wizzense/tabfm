@@ -979,17 +979,17 @@ class PreprocessingPipeline(TransformerMixin, BaseEstimator):
     if self.n_features_in_ == 0:
       return X
     if self.standard_scaler_ is not None:
-      X = self.standard_scaler_.transform(X)  # pytype: disable=attribute-error
+      X = self.standard_scaler_.transform(X)
     if self.normalizer_ is not None:
       try:
         # this can fail in rare cases if there is an outlier in X that was not present in fit()
-        X = self.normalizer_.transform(X)  # pytype: disable=attribute-error
+        X = self.normalizer_.transform(X)
       except ValueError:
         # clip values to train min/max
         X = np.clip(X, self.X_min_, self.X_max_)
-        X = self.normalizer_.transform(X)  # pytype: disable=attribute-error
+        X = self.normalizer_.transform(X)
     if self.outlier_remover_ is not None:
-      X = self.outlier_remover_.transform(X)  # pytype: disable=attribute-error
+      X = self.outlier_remover_.transform(X)
     return X
 
 
@@ -1031,8 +1031,6 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
     svd_pool_end_: Ending column index in ``X_`` for the SVD features pool.
     k_crosses_list_: List of feature cross counts to sample per ensemble member.
     k_svd_list_: List of SVD feature counts to sample per ensemble member.
-    ensemble_feature_strategy: Strategy name for allocating augmented features
-      across ensemble members.
   """
 
   norm_methods_: List[str]
@@ -1059,7 +1057,6 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
   svd_pool_end_: int
   k_crosses_list_: List[int]
   k_svd_list_: List[int]
-  ensemble_feature_strategy: str
 
   def __init__(
       self,
@@ -1075,7 +1072,6 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
       n_feature_crosses: Union[int, str] = 0,
       n_svd_features: Union[int, str] = 0,
       total_svd_pool: Optional[int] = None,
-      ensemble_feature_strategy: str = "split",
       random_state: Optional[int] = None,
       task: str = "classification",
   ):
@@ -1096,16 +1092,11 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
       max_num_features: Maximum number of features to subsample per ensemble
         member.
       max_num_rows: Maximum number of rows to subsample per ensemble member.
-      n_feature_crosses: Number of random feature crosses to generate per
-        ensemble member, or ``"sqrt"`` for sqrt(n_features).
-      n_svd_features: Number of random SVD features to select per ensemble
-        member, or ``"sqrt"`` for sqrt(n_features).
+      n_feature_crosses: ``"sqrt"`` to add sqrt(n_features) random feature
+        crosses per ensemble member, or ``0`` to disable.
+      n_svd_features: ``"sqrt"`` to add sqrt(n_features) random SVD features per
+        ensemble member, or ``0`` to disable.
       total_svd_pool: Total pool size of SVD features to generate.
-      ensemble_feature_strategy: Strategy for allocating feature crosses & SVD
-        features to ensemble members, one of ``"constant"``, ``"random"``, or
-        ``"split"``. ``constant``: n_*_features added to each member;
-        ``random``: between 0 and n_*_features added to each member; ``split``:
-        some members have no added features, others have n_*_features.
       task: Either ``"classification"`` or ``"regression"``.
     """
     self.n_estimators = n_estimators
@@ -1120,43 +1111,35 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
     self.n_feature_crosses = n_feature_crosses
     self.n_svd_features = n_svd_features
     self.total_svd_pool = total_svd_pool
-    self.ensemble_feature_strategy = ensemble_feature_strategy
     self.random_state = random_state
     self.task = task
 
   def _get_n_features_to_add(
-      self, n_features_requested: Union[int, str], n_cols: int
+      self, n_features_requested: Union[int, str, None], n_cols: int
   ) -> int:
+    if n_features_requested in (0, None):
+      return 0
     if (
         isinstance(n_features_requested, str)
         and n_features_requested.lower() == "sqrt"
     ):
       return max(1, int(np.sqrt(n_cols)))
-    try:
-      n_features = int(n_features_requested)
-    except (ValueError, TypeError) as e:
-      raise ValueError(
-          "Invalid requested number of features:"
-          f" '{n_features_requested}'. Expected an integer or 'sqrt'."
-      ) from e
-    if n_features < 0:
-      raise ValueError(
-          f"Requested number of features '{n_features}' cannot be negative."
-      )
-    return n_features
+    raise ValueError(
+        f"Invalid requested number of features: {n_features_requested!r}."
+        " Expected 0 (disabled) or 'sqrt'."
+    )
 
   def _get_member_n_features_list(
       self, n_features_requested: Any, n_cols: int
   ) -> List[int]:
-    """Resolves the number of features to add for each ensemble member."""
+    """Resolves the number of features to add for each ensemble member.
+
+    Uses the "split" allocation: even-indexed members get no added features
+    while odd-indexed members get the full ``k_max``, yielding a diverse mix
+    of augmented and non-augmented views.
+    """
     k_max = self._get_n_features_to_add(n_features_requested, n_cols)
-    strategy = getattr(self, "ensemble_feature_strategy", "split")
-    if strategy == "random":
-      return [self.rng_.randint(0, k_max) for _ in range(self.n_estimators)]
-    elif strategy == "split":
-      return [0 if i % 2 == 0 else k_max for i in range(self.n_estimators)]
-    else:  # constant
-      return [k_max] * self.n_estimators
+    return [0 if i % 2 == 0 else k_max for i in range(self.n_estimators)]
 
   def fit(self, X: Any, y: Any) -> "EnsembleGenerator":
     """Fit the ensemble generator to training data.
@@ -1781,7 +1764,7 @@ def _pad_cat_mask(cat_mask: np.ndarray, target_features: int) -> np.ndarray:
 
 
 class TabFMClassifier(ClassifierMixin, BaseEstimator):
-  """Tabular In-Context Learning (TabFM) classifier with scikit-learn interface.
+  """TabFM (Tabular Foundation Model) classifier with scikit-learn interface.
 
   The TabFM model is a pre-trained foundation model that makes predictions via
   in-context learning: at inference time it is shown the training data as
@@ -1800,8 +1783,6 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
     ensemble_weights_: Blending weights for ensemble members computed via NNLS.
     calibration_lambda: L2 regularization strength for calibration parameter
       scaling.
-    min_samples_per_class_for_calibration: Minimum samples required per class to
-      allow calibration; otherwise calibration is disabled.
   """
 
   y_encoder_: CategoricalOrdinalEncoder
@@ -1812,7 +1793,6 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
   active_calibration_method_: Optional[str]
   ensemble_weights_: np.ndarray
   calibration_lambda: float
-  min_samples_per_class_for_calibration: int
 
   def __init__(
       self,
@@ -1840,9 +1820,7 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
       total_svd_pool: Optional[int] = None,
       enable_nnls: bool = False,
       nnls_beta: float = 0.75,
-      ensemble_feature_strategy: str = "split",
       calibration_lambda: float = 1e-2,
-      min_samples_per_class_for_calibration: int = 0,
   ):
     """Initialises the classifier.
 
@@ -1874,19 +1852,15 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
       multiclass_calibration_method: Calibration method for multiclass problems
         (``None`` or ``"vector"``).
       num_folds_for_cv: Number of folds for out-of-fold predictions.
-      n_feature_crosses: Number of random feature crosses to generate per
-        ensemble member.
-      n_svd_features: Number of random SVD features to select per ensemble
-        member.
+      n_feature_crosses: ``"sqrt"`` to add sqrt(n_features) random feature
+        crosses per ensemble member, or ``0`` to disable.
+      n_svd_features: ``"sqrt"`` to add sqrt(n_features) random SVD features per
+        ensemble member, or ``0`` to disable.
       total_svd_pool: Total pool size of SVD features to generate.
       enable_nnls: Whether to enable NNLS weighted ensemble.
       nnls_beta: Blending weight for NNLS.
-      ensemble_feature_strategy: Strategy for allocating feature crosses & SVD
-        features to ensemble members.
       calibration_lambda: L2 regularization strength for calibration parameter
         scaling.
-      min_samples_per_class_for_calibration: Minimum samples required per class
-        to allow calibration; otherwise calibration is disabled.
     """
     self.model = model
     self.n_estimators = n_estimators
@@ -1912,14 +1886,9 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
     self.total_svd_pool = total_svd_pool
     self.enable_nnls = enable_nnls
     self.nnls_beta = nnls_beta
-    self.ensemble_feature_strategy = ensemble_feature_strategy
     self.calibration_lambda = calibration_lambda
-    self.min_samples_per_class_for_calibration = (
-        min_samples_per_class_for_calibration
-    )
     if self.average_logits and self.enable_nnls:
       raise ValueError("average_logits and enable_nnls cannot both be True.")
-    # TODO(tamann): Support both max_num_rows and enable_nnls.
     if self.max_num_rows is not None and self.enable_nnls:
       raise ValueError(
           "max_num_rows and enable_nnls cannot both be set at this time."
@@ -1988,7 +1957,9 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
     check_classification_targets(y)
 
     # Encode class labels
-    self.y_encoder_ = CategoricalOrdinalEncoder(dtype=np.int64)
+    self.y_encoder_ = CategoricalOrdinalEncoder(
+        dtype=np.int64, mode="alphabetical"
+    )
     # Reshape for CategoricalOrdinalEncoder
     y_2d = y.reshape(-1, 1) if isinstance(y, np.ndarray) else np.array(y).reshape(-1, 1)
     y_encoded = self.y_encoder_.fit_transform(y_2d)
@@ -2003,22 +1974,6 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
         if self.n_classes_ == 2
         else self.multiclass_calibration_method
     )
-
-    if (
-        self.min_samples_per_class_for_calibration > 0
-        and self.active_calibration_method_ is not None
-        and self.active_calibration_method_ != "none"
-    ):
-      class_counts = np.bincount(y)
-      if np.any(class_counts < self.min_samples_per_class_for_calibration):
-        if self.verbose:
-          print(
-              f"Disabling calibration ({self.active_calibration_method_})"
-              " because some classes have fewer than"
-              f" {self.min_samples_per_class_for_calibration} samples. Counts:"
-              f" {class_counts}"
-          )
-        self.active_calibration_method_ = None
 
     if self.n_classes_ > self.model.max_classes:
       raise ValueError(
@@ -2055,7 +2010,6 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
         n_feature_crosses=self.n_feature_crosses,
         n_svd_features=self.n_svd_features,
         total_svd_pool=self.total_svd_pool,
-        ensemble_feature_strategy=self.ensemble_feature_strategy,
     )
     self.ensemble_generator_.fit(X, y)
 
@@ -2551,12 +2505,13 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
     4. Corrects for class shifts
     5. Averages predictions across ensemble members
 
-    Args: X : array-like of shape (n_samples, n_features) Test samples for
-    prediction.
+    Args:
+      X: array-like of shape (n_samples, n_features). Test samples for
+        prediction.
 
     Returns:
       np.ndarray of shape (n_samples, n_classes)
-        Class probabilities for each test sample.    check_is_fitted(self)
+        Class probabilities for each test sample.
     """
     check_is_fitted(self)
 
@@ -2614,7 +2569,7 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
 
 
 class TabFMRegressor(RegressorMixin, BaseEstimator):
-  """Tabular In-Context Learning (TabFM) regressor with scikit-learn interface.
+  """TabFM (Tabular Foundation Model) regressor with scikit-learn interface.
 
   The pre-trained TabFM model is used for in-context regression.  Target
   values are standardized before being passed to the model and are
@@ -2655,7 +2610,6 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
       total_svd_pool: Optional[int] = None,
       enable_nnls: bool = False,
       nnls_beta: float = 0.75,
-      ensemble_feature_strategy: str = "split",
   ):
     """Initialises the regressor.
 
@@ -2678,15 +2632,13 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
       cat_encoder_mode: Categorical encoding order (``"appearance"`` or
         ``"frequency"``).
       num_folds_for_cv: Number of folds for out-of-fold predictions.
-      n_feature_crosses: Number of random feature crosses to generate per
-        ensemble member.
-      n_svd_features: Number of random SVD features to select per ensemble
-        member.
+      n_feature_crosses: ``"sqrt"`` to add sqrt(n_features) random feature
+        crosses per ensemble member, or ``0`` to disable.
+      n_svd_features: ``"sqrt"`` to add sqrt(n_features) random SVD features per
+        ensemble member, or ``0`` to disable.
       total_svd_pool: Total pool size of SVD features to generate.
       enable_nnls: Whether to enable NNLS weighted ensemble.
       nnls_beta: Blending weight for NNLS.
-      ensemble_feature_strategy: Strategy for allocating feature crosses & SVD
-        features to ensemble members.
     """
     self.model = model
     self.n_estimators = n_estimators
@@ -2707,7 +2659,6 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
     self.total_svd_pool = total_svd_pool
     self.enable_nnls = enable_nnls
     self.nnls_beta = nnls_beta
-    self.ensemble_feature_strategy = ensemble_feature_strategy
     if self.max_num_rows is not None and self.enable_nnls:
       raise ValueError(
           "max_num_rows and enable_nnls cannot both be set at this time."
@@ -2793,7 +2744,6 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
         n_feature_crosses=self.n_feature_crosses,
         n_svd_features=self.n_svd_features,
         total_svd_pool=self.total_svd_pool,
-        ensemble_feature_strategy=self.ensemble_feature_strategy,
     )
     self.ensemble_generator_.fit(X, y)
 
@@ -2804,7 +2754,6 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
       n_est, n_tr = self.y_oof_scaled_.shape
       y_oof = np.zeros((n_est, n_tr))
       for i in range(n_est):
-        # TODO(tamann): Check if we can just work in the scaled space.
         y_oof[i, :] = self._inverse_transform_y(self.y_oof_scaled_[i])
 
       weights, _ = opt.nnls(y_oof.T, y_orig)
@@ -3112,8 +3061,9 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
     Applies the ensemble of TabFM models to make predictions, with each
     ensemble member providing predictions that are then averaged.
 
-    Args: X : array-like of shape (n_samples, n_features) Test samples for
-    prediction.
+    Args:
+      X: array-like of shape (n_samples, n_features). Test samples for
+        prediction.
 
     Returns:
       np.ndarray of shape (n_samples,)

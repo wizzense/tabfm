@@ -15,8 +15,6 @@
 from unittest import mock
 from absl.testing import absltest
 from flax import nnx
-import jax
-import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 from tabfm.src import model as tabfm_model
@@ -253,35 +251,22 @@ class EnsembleGeneratorTest(absltest.TestCase):
     X_enc = np.random.rand(10, 5)
     y = np.random.randint(0, 2, size=10)
 
-    # 1. Test "split" strategy
+    # "split" allocation with sqrt feature crosses: sqrt(5) -> 2, so
+    # even-indexed members get no crosses and odd-indexed members get 2.
     generator = EnsembleGenerator(
         n_estimators=5,
         norm_methods=["none"],
-        n_feature_crosses=4,
-        ensemble_feature_strategy="split",
+        n_feature_crosses="sqrt",
         random_state=42,
     )
     generator.fit(X_enc, y)
 
-    self.assertEqual(generator.k_crosses_list_, [0, 4, 0, 4, 0])
+    self.assertEqual(generator.k_crosses_list_, [0, 2, 0, 2, 0])
 
     data = generator.transform(X_enc)
     X_out, _ = data["none"]
-    # max features = 5 + 4 = 9
-    self.assertEqual(X_out.shape[2], 9)
-
-    # 2. Test "random" strategy
-    generator_random = EnsembleGenerator(
-        n_estimators=5,
-        norm_methods=["none"],
-        n_feature_crosses=4,
-        ensemble_feature_strategy="random",
-        random_state=42,
-    )
-    generator_random.fit(X_enc, y)
-
-    for k in generator_random.k_crosses_list_:
-      self.assertTrue(0 <= k <= 4)
+    # max features = 5 + 2 = 7
+    self.assertEqual(X_out.shape[2], 7)
 
 
 class OOFPredictionTest(absltest.TestCase):
@@ -324,10 +309,9 @@ class OOFPredictionTest(absltest.TestCase):
 
   def test_regressor_feature_crosses(self):
     regressor = TabFMRegressor(
-        n_feature_crosses=2,
+        n_feature_crosses="sqrt",
         n_estimators=2,
         model=mock.Mock(),
-        ensemble_feature_strategy="constant",
     )
 
     X = np.random.rand(10, 4)
@@ -335,21 +319,21 @@ class OOFPredictionTest(absltest.TestCase):
 
     regressor.fit(X, y)
 
-    # Pooled data should have N + E*K = 4 + 2*2 = 8 columns
-    self.assertEqual(regressor.ensemble_generator_.X_.shape[1], 8)
+    # Split allocation with sqrt(4)=2 crosses on the odd member: pooled data
+    # has N + 2 = 4 + 2 = 6 columns.
+    self.assertEqual(regressor.ensemble_generator_.X_.shape[1], 6)
 
     X_test = np.random.rand(5, 4)
     data = regressor.ensemble_generator_.transform(X_test)
     for _, (Xs, _) in data.items():
-      # Each member should only extract N + K = 4 + 2 = 6 columns
+      # Members are padded to N + K = 4 + 2 = 6 columns.
       self.assertEqual(Xs.shape[2], 6)
 
   def test_regressor_svd_features(self):
     regressor = TabFMRegressor(
-        n_svd_features=2,
+        n_svd_features="sqrt",
         n_estimators=2,
         model=mock.Mock(),
-        ensemble_feature_strategy="constant",
     )
 
     X = pd.DataFrame({
@@ -361,8 +345,8 @@ class OOFPredictionTest(absltest.TestCase):
 
     regressor.fit(X, y)
 
-    # 3 original (2 num + 1 cat) + 3 SVD (4 OHE-features prep, min(10, 4)-1 = 3)
-    self.assertEqual(regressor.ensemble_generator_.X_.shape[1], 6)
+    # 3 original (2 num + 1 cat) + 1 SVD (sqrt(3)=1) = 4 columns.
+    self.assertEqual(regressor.ensemble_generator_.X_.shape[1], 4)
 
     X_test = pd.DataFrame({
         "num1": np.random.rand(5),
@@ -372,7 +356,7 @@ class OOFPredictionTest(absltest.TestCase):
     X_test_encoded = regressor.X_encoder_.transform(X_test)
     data = regressor.ensemble_generator_.transform(X_test_encoded)
     for _, (Xs, _) in data.items():
-      self.assertEqual(Xs.shape[2], 5)
+      self.assertEqual(Xs.shape[2], 4)
 
   def test_regressor_nnls_blending(self):
     model = tabfm_model.TabFM(
@@ -424,7 +408,6 @@ class OOFPredictionTest(absltest.TestCase):
         max_num_features=4,
         n_estimators=2,
         model=mock.Mock(),
-        ensemble_feature_strategy="constant",
     )
 
     X = np.random.rand(10, 5)
@@ -432,14 +415,15 @@ class OOFPredictionTest(absltest.TestCase):
 
     regressor.fit(X, y)
 
-    # 5 original + 4 crosses pool + 4 SVD pool = 13 columns
-    self.assertEqual(regressor.ensemble_generator_.X_.shape[1], 13)
+    # Split allocation: sqrt(min(5, 4))=2. 5 original + 2 crosses pool +
+    # 2 SVD pool = 9 columns.
+    self.assertEqual(regressor.ensemble_generator_.X_.shape[1], 9)
 
     X_test = np.random.rand(5, 5)
     X_test_encoded = regressor.X_encoder_.transform(X_test)
     data = regressor.ensemble_generator_.transform(X_test_encoded)
     for _, (Xs, _) in data.items():
-      # max_num_features (4) + K_crosses (2) + K_svd (2) = 8 columns
+      # Members padded to max_num_features (4) + K_crosses (2) + K_svd (2) = 8.
       self.assertEqual(Xs.shape[2], 8)
 
   def test_regressor_predict_oof(self):
@@ -521,9 +505,8 @@ class OOFPredictionTest(absltest.TestCase):
     regressor = TabFMRegressor(
         n_estimators=2,
         batch_size=2,
-        n_feature_crosses=2,
-        n_svd_features=3,
-        ensemble_feature_strategy="split",
+        n_feature_crosses="sqrt",
+        n_svd_features="sqrt",
         model=mock.Mock(),
     )
 
@@ -539,8 +522,9 @@ class OOFPredictionTest(absltest.TestCase):
         regressor, "_batch_forward", side_effect=mock_forward
     ) as mock_batch_forward:
       regressor.fit(X, y)
-      self.assertEqual(regressor.ensemble_generator_.k_crosses_list_, [0, 2])
-      self.assertEqual(regressor.ensemble_generator_.k_svd_list_, [0, 3])
+      # Split allocation with sqrt(3)=1 for both crosses and SVD.
+      self.assertEqual(regressor.ensemble_generator_.k_crosses_list_, [0, 1])
+      self.assertEqual(regressor.ensemble_generator_.k_svd_list_, [0, 1])
 
       preds = regressor.predict(X_test)
       self.assertEqual(preds.shape, (5,))
@@ -769,7 +753,6 @@ class StackingTest(absltest.TestCase):
         n_feature_crosses="sqrt",
         n_svd_features="sqrt",
         max_num_features=4,
-        ensemble_feature_strategy="constant",
     )
 
     X = pd.DataFrame({
@@ -783,7 +766,7 @@ class StackingTest(absltest.TestCase):
 
     classifier.fit(X, y)
 
-    self.assertEqual(classifier.ensemble_generator_.X_.shape[1], 12)
+    self.assertEqual(classifier.ensemble_generator_.X_.shape[1], 9)
 
     probs = classifier.predict_proba(X)
     self.assertEqual(probs.shape, (10, 2))
@@ -905,24 +888,6 @@ class StackingTest(absltest.TestCase):
     self.assertLen(patterns_none[0], 6)
     self.assertLen(patterns_power[0], 6)
 
-  def test_min_samples_per_class_for_calibration(self):
-    classifier = TabFMClassifier(
-        model=self.model,
-        n_estimators=2,
-        binary_calibration_method="platt",
-        min_samples_per_class_for_calibration=20,
-    )
-    X = np.random.rand(10, 3)
-    y = np.array([0, 1, 0, 1, 0, 1, 0, 1, 0, 1])
-
-    mock_oof = np.random.dirichlet([1, 1], size=(2, 10))
-    with mock.patch.object(
-        classifier, "predict_oof_proba", return_value=mock_oof
-    ):
-      classifier.fit(X, y)
-
-    self.assertIsNone(classifier.active_calibration_method_)
-
 
 class EnsemblePresetTest(absltest.TestCase):
 
@@ -964,6 +929,35 @@ class EnsemblePresetTest(absltest.TestCase):
     self.assertEqual(clf.n_svd_features, 0)
     self.assertFalse(clf.enable_nnls)
     self.assertIsNone(clf.binary_calibration_method)
+
+
+class LabelEncodingTest(absltest.TestCase):
+
+  def test_classes_are_alphabetical(self):
+    # classes_ must follow sklearn's sorted (alphabetical) convention,
+    # independent of label order of appearance. Regression guard for the
+    # y-encoder being constructed with mode="alphabetical".
+    model = tabfm_model.TabFM(
+        loss="cross_entropy",
+        max_classes=2,
+        embed_dim=8,
+        col_num_blocks=1,
+        col_nhead=2,
+        col_num_inds=8,
+        row_num_blocks=1,
+        row_nhead=2,
+        row_num_cls=1,
+        icl_num_blocks=1,
+        icl_nhead=2,
+        rngs=nnx.Rngs(0),
+    )
+    clf = TabFMClassifier(model=model, n_estimators=2)
+    x = np.random.rand(6, 3)
+    # Appearance order is ("z", "a"); alphabetical order is ("a", "z").
+    y = np.array(["z", "a", "z", "a", "z", "a"])
+    clf.fit(x, y)
+    np.testing.assert_array_equal(clf.classes_, np.array(["a", "z"]))
+    self.assertEqual(clf.y_encoder_.mode, "alphabetical")
 
 
 if __name__ == "__main__":
