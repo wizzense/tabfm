@@ -21,6 +21,7 @@ them from a local path.
 
 from dataclasses import dataclass
 import os
+import threading
 from typing import Any, Dict, Optional
 from absl import logging
 from flax import nnx
@@ -119,6 +120,7 @@ class RegressionConfig(Config):
 #      so the key guarantees we never return a model loaded with settings
 #      different from those requested. (Equivalent to functools.lru_cache on
 #      the arguments; kept explicit for the use_cache=False escape hatch.)
+_LOAD_CACHE_LOCK = threading.Lock()
 _LOAD_CACHE: Dict[Any, "TabFM"] = {}
 
 
@@ -165,71 +167,78 @@ def load(
       model_type, checkpoint_path, step,
       col_attention_impl, row_attention_impl, icl_attention_impl, str(dtype),
   )
-  if use_cache and cache_key in _LOAD_CACHE:
-    return _LOAD_CACHE[cache_key]
-
-  from tabfm.src.jax.model import AttentionImplementation
-
-  # 1. Instantiate model with hardcoded config based on model_type
-  if model_type == "classification":
-    config = ClassificationConfig()
-  elif model_type == "regression":
-    config = RegressionConfig()
-  else:
-    raise ValueError(
-        f"Unsupported model_type: {model_type}. Must be 'classification' or"
-        " 'regression'."
-    )
-
-  rngs = nnx.Rngs(0)
-  config_dict = config.to_dict()
-  config_dict['col_attention_impl'] = AttentionImplementation(col_attention_impl)
-  config_dict['row_attention_impl'] = AttentionImplementation(row_attention_impl)
-  config_dict['icl_attention_impl'] = AttentionImplementation(icl_attention_impl)
-  model = TabFM(rngs=rngs, dtype=dtype, **config_dict)
-
-  # 2. Get checkpoint directory
-  if checkpoint_path is None:
-    # Download from Hugging Face
-    try:
-      from huggingface_hub import snapshot_download  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
-
-      logging.info(
-          "Downloading TabFM v1.0.0 %s weights from Hugging Face...", model_type
-      )
-      base_path = snapshot_download(repo_id=HF_REPO_ID)
-      checkpoint_path = os.path.join(base_path, model_type)
-    except ImportError as e:
-      raise ImportError(
-          "huggingface_hub is required to download weights. "
-          "Install it using 'pip install huggingface_hub' or provide a "
-          "local checkpoint_path."
-      ) from e
-  else:
-    # If local root checkpoint path is provided, try appending model_type
-    if not os.path.exists(os.path.join(checkpoint_path, "orbax")):
-      potential_path = os.path.join(checkpoint_path, model_type)
-      if os.path.exists(os.path.join(potential_path, "orbax")):
-        checkpoint_path = potential_path
-
-  # 3. Restore parameters from local/downloaded path
-  checkpoint_manager = checkpointing.create_checkpoint_manager(
-      checkpoint_path, read_only=True
-  )
-  if step is None:
-    step = checkpoint_manager.latest_step()
-    if step is None:
-      raise ValueError(f"No checkpoints found in {checkpoint_path}/orbax")
-
-  state = nnx.state(model)
-  restored = checkpoint_manager.restore(
-      step,
-      args=ocp.args.Composite(
-          params=ocp.args.StandardRestore(state, strict=False)
-      ),
-  )
-  nnx.update(model, restored["params"])
-
   if use_cache:
-    _LOAD_CACHE[cache_key] = model
-  return model
+    _LOAD_CACHE_LOCK.acquire()
+
+  try:
+    if use_cache and cache_key in _LOAD_CACHE:
+      return _LOAD_CACHE[cache_key]
+
+    from tabfm.src.jax.model import AttentionImplementation
+
+    # 1. Instantiate model with hardcoded config based on model_type
+    if model_type == "classification":
+      config = ClassificationConfig()
+    elif model_type == "regression":
+      config = RegressionConfig()
+    else:
+      raise ValueError(
+          f"Unsupported model_type: {model_type}. Must be 'classification' or"
+          " 'regression'."
+      )
+
+    rngs = nnx.Rngs(0)
+    config_dict = config.to_dict()
+    config_dict['col_attention_impl'] = AttentionImplementation(col_attention_impl)
+    config_dict['row_attention_impl'] = AttentionImplementation(row_attention_impl)
+    config_dict['icl_attention_impl'] = AttentionImplementation(icl_attention_impl)
+    model = TabFM(rngs=rngs, dtype=dtype, **config_dict)
+
+    # 2. Get checkpoint directory
+    if checkpoint_path is None:
+      # Download from Hugging Face
+      try:
+        from huggingface_hub import snapshot_download  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
+
+        logging.info(
+            "Downloading TabFM v1.0.0 %s weights from Hugging Face...", model_type
+        )
+        base_path = snapshot_download(repo_id=HF_REPO_ID)
+        checkpoint_path = os.path.join(base_path, model_type)
+      except ImportError as e:
+        raise ImportError(
+            "huggingface_hub is required to download weights. "
+            "Install it using 'pip install huggingface_hub' or provide a "
+            "local checkpoint_path."
+        ) from e
+    else:
+      # If local root checkpoint path is provided, try appending model_type
+      if not os.path.exists(os.path.join(checkpoint_path, "orbax")):
+        potential_path = os.path.join(checkpoint_path, model_type)
+        if os.path.exists(os.path.join(potential_path, "orbax")):
+          checkpoint_path = potential_path
+
+    # 3. Restore parameters from local/downloaded path
+    checkpoint_manager = checkpointing.create_checkpoint_manager(
+        checkpoint_path, read_only=True
+    )
+    if step is None:
+      step = checkpoint_manager.latest_step()
+      if step is None:
+        raise ValueError(f"No checkpoints found in {checkpoint_path}/orbax")
+
+    state = nnx.state(model)
+    restored = checkpoint_manager.restore(
+        step,
+        args=ocp.args.Composite(
+            params=ocp.args.StandardRestore(state, strict=False)
+        ),
+    )
+    nnx.update(model, restored["params"])
+
+    if use_cache:
+      _LOAD_CACHE[cache_key] = model
+    return model
+  finally:
+    if use_cache:
+      _LOAD_CACHE_LOCK.release()

@@ -241,8 +241,15 @@ class OneHotAndLinear(nn.Module):
     self.projection = nn.Linear(num_classes, embed_dim)
 
   def forward(self, y):  # y: [B, T] int
-    oh = F.one_hot(y.long(), self.num_classes).to(self.projection.weight.dtype)
-    return self.projection(oh)
+    y_long = y.long()
+    y_mapped = torch.where(
+        (y_long >= 0) & (y_long < self.num_classes),
+        y_long,
+        torch.tensor(self.num_classes, device=y.device)
+    )
+    oh = F.one_hot(y_mapped, self.num_classes + 1).to(self.projection.weight.dtype)
+    oh_sliced = oh[..., :self.num_classes]
+    return self.projection(oh_sliced)
 
 
 class CellEmbedder(nn.Module):
@@ -305,7 +312,8 @@ class CellEmbedder(nn.Module):
                for s in range(0, x.shape[1], self.row_chunk_size)]
       cell = torch.cat(parts, dim=1)
     if self.is_classifier:
-      y_emb = self.y_embedder_lookup(y.long())  # [B,T,E]
+      y_clean = torch.clamp(y.long(), 0, self.y_embedder_lookup.num_embeddings - 1)
+      y_emb = self.y_embedder_lookup(y_clean)  # [B,T,E]
     else:
       y_emb = self.y_embedder_lookup(y[..., None].to(cell.dtype))  # scalar -> [B,T,E]
     t = x.shape[1]
@@ -416,6 +424,8 @@ class TabFM(nn.Module):
                feature_group_size=3, num_freq=32, decoder_hidden=None,
                is_classifier=True):
     super().__init__()
+    self.max_classes = max_classes
+    self.is_classifier = is_classifier
     ff = embed_dim * ff_factor
     icl_dim = embed_dim * row_num_cls
     self.cell_embedder = CellEmbedder(embed_dim, max_classes, feature_group_size,
