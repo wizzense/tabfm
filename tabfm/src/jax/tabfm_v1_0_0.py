@@ -138,24 +138,25 @@ def _restore_from_dir(
   return model
 
 
-class TabFMJax(ModelHubMixin):
+class TabFM_HF(TabFM, ModelHubMixin):
   """JAX TabFM model with HuggingFace Hub support.
 
-  Wraps the underlying Flax NNX module and provides from_pretrained(),
-  save_pretrained(), and push_to_hub() via ModelHubMixin.  All calls to the
-  wrapped model (forward pass, attribute access) are transparently delegated,
-  so existing code that treats this object as the NNX module continues to work.
+  Subclasses TabFM directly rather than wrapping it, since NNX has special
+  handling for nnx.Module subclasses that a wrapper breaks under JIT.
+  Provides from_pretrained(), save_pretrained(), and push_to_hub() via
+  ModelHubMixin.
   """
 
-  def __init__(self, _model: TabFM, model_type: str = "classification"):
-    object.__setattr__(self, "_model", _model)
+  def __init__(self, *args, model_type: str = "classification", **kwargs):
+    super().__init__(*args, **kwargs)
     object.__setattr__(self, "_model_type", model_type)
 
-  def __call__(self, *args, **kwargs):
-    return self._model(*args, **kwargs)
-
-  def __getattr__(self, name: str):
-    return getattr(object.__getattribute__(self, "_model"), name)
+  def __setattr__(self, name: str, value: Any):
+    if name in ("_hub_mixin_config", "_model_type"):
+      # Bypass NNX checking entirely and write directly to Python's object dict.
+      object.__setattr__(self, name, value)
+    else:
+      super().__setattr__(name, value)
 
   @classmethod
   def _from_pretrained(
@@ -174,7 +175,7 @@ class TabFMJax(ModelHubMixin):
       icl_attention_impl: str = "flash",
       dtype: Any = jnp.bfloat16,
       **kwargs,
-  ) -> "TabFMJax":
+  ) -> "TabFM_HF":
     from tabfm.src.jax.model import AttentionImplementation  # pylint: disable=g-import-not-at-top
 
     if model_type == "classification":
@@ -192,7 +193,7 @@ class TabFMJax(ModelHubMixin):
     config_dict["row_attention_impl"] = AttentionImplementation(row_attention_impl)
     config_dict["icl_attention_impl"] = AttentionImplementation(icl_attention_impl)
 
-    model = TabFM(rngs=nnx.Rngs(0), dtype=dtype, **config_dict)
+    model = cls(rngs=nnx.Rngs(0), dtype=dtype, model_type=model_type, **config_dict)
 
     if os.path.isdir(model_id):
       checkpoint_path = model_id
@@ -212,22 +213,21 @@ class TabFMJax(ModelHubMixin):
       )
       checkpoint_path = os.path.join(base_path, model_type)
 
-    _restore_from_dir(model, checkpoint_path, model_type, step)
-    return cls(model, model_type=model_type)
+    return _restore_from_dir(model, checkpoint_path, model_type, step)
 
   def _save_pretrained(self, save_directory):
     """Save Orbax checkpoint to save_directory/<model_type>/orbax/."""
     out_path = os.path.join(save_directory, self._model_type)
     os.makedirs(out_path, exist_ok=True)
     manager = checkpointing.create_checkpoint_manager(out_path, read_only=False)
-    state = nnx.state(self._model)
+    state = nnx.state(self)
     manager.save(0, args=ocp.args.Composite(params=ocp.args.StandardSave(state)))
     manager.wait_until_finished()
 
 
-# Process-wide memo of restored models (shared by load() and TabFMJax).
+# Process-wide memo of restored models (shared by load() and TabFM_HF).
 _LOAD_CACHE_LOCK = threading.Lock()
-_LOAD_CACHE: Dict[Any, "TabFMJax"] = {}
+_LOAD_CACHE: Dict[Any, "TabFM_HF"] = {}
 
 
 def load(
@@ -240,7 +240,7 @@ def load(
     icl_attention_impl: str = "flash",
     dtype: Any = jnp.bfloat16,
     use_cache: bool = True,
-) -> "TabFMJax":
+) -> "TabFM_HF":
   """Loads the TabFM v1.0.0 JAX model with pre-trained weights.
 
   If `checkpoint_path` is not provided, downloads weights from Hugging Face
@@ -259,7 +259,7 @@ def load(
     use_cache: Reuse a process-wide cached model for identical settings.
 
   Returns:
-    A TabFMJax wrapper around the restored NNX model.
+    The restored TabFM_HF model.
   """
   cache_key = (
       model_type,
@@ -276,7 +276,7 @@ def load(
     if use_cache and cache_key in _LOAD_CACHE:
       return _LOAD_CACHE[cache_key]
 
-    result = TabFMJax.from_pretrained(
+    result = TabFM_HF.from_pretrained(
         HF_REPO_ID if checkpoint_path is None else checkpoint_path,
         model_type=model_type,
         step=step,
